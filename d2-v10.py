@@ -12,8 +12,8 @@ config = {
     "d_model": 896,          
     "n_heads": 14,           
     "n_layers": 16,
-    "batch_size": 4,         
-    "accum_steps": 3,        
+    "batch_size": 2,         
+    "accum_steps": 6,        
     "block_size": 768,       
     "lr": 4e-4,
     "epochs": 20000,         
@@ -148,7 +148,9 @@ class D2V10Block(nn.Module):
         super().__init__()
         self.attn = CausalGatedLinearAttentionV10(d_model, n_heads)
         self.mlp = MLP(d_model)
+        
     def forward(self, x):
+        # Block 的任務是單純的特徵提取與殘差連接
         x = x + self.attn(x)
         x = x + self.mlp(x)
         return x
@@ -170,8 +172,13 @@ class D2V10Model(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, x):
+        # Model 才是負責把 Token 轉 Embedding，然後進入 Checkpoint 迴圈的地方
         x = self.embedding(x)
-        x = self.blocks(x)
+        
+        # 🌟 啟動 Gradient Checkpointing，完美壓制顯存
+        for block in self.blocks:
+            x = torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)
+            
         return self.head(self.out_ln(x))
 
 # --- 3. V10 創世紀點火 (加入 3060 榨汁機優化) ---
