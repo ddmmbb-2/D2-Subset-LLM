@@ -1,216 +1,146 @@
-```markdown
-# D2 V7 50M Sparse Gate LLM
+ ```markdown
+# D2-V10: Implicit MoE Linear Attention LLM
+**隱式專家線性注意力語言模型 (180M)**
 
-A small-scale LLM experiment using **Causal Gated-D2 Attention** with sparsity constraints, trained from scratch on Chinese classical text.
+A lightweight LLM experiment exploring **Causal Gated Linear Attention** with sparsity constraints, trained from scratch on a mixed corpus (Wiki, Classical Chinese, Python). 
+這是一個輕量級的 LLM 架構實驗，探討**因果門控線性注意力**與稀疏約束，並使用混合語料（維基百科、古文、Python 程式碼）從零訓練。
 
-This project explores whether **feature gating + sparsity regularization** can produce emergent specialization similar to **Mixture-of-Experts**, but **without explicit routing**.
-
----
-
-# Model Architecture
-
-The D2 architecture introduces a **Concept Gate** that selectively activates neural features before attention computation.
-
-```
-
-```
-            ┌─────────────────────┐
-            │      Input Token     │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │      Embedding       │
-            │    (Token → Vector)  │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │     LayerNorm        │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │     QKV Projection   │
-            │     Linear(d → 3d)   │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │     Concept Gate     │
-            │     sigmoid(Wx)      │
-            │  Sparse Activation   │
-            └──────────┬──────────┘
-                       │
-            Gate Applied to Q,K
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │   Causal Attention   │
-            │  (Prefix Computation)│
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │   Projection Layer   │
-            │      Linear(d,d)     │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │   Residual Add       │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │        MLP           │
-            │   GELU Activation    │
-            └──────────┬──────────┘
-                       │
-                       ▼
-            ┌─────────────────────┐
-            │     Output Layer     │
-            │     Vocabulary       │
-            └─────────────────────┘
-```
-
-```
+This project explores whether **feature gating + sparsity regularization** can produce emergent specialization similar to **Mixture-of-Experts (MoE)**, but **without explicit routing** and with **$O(N)$ linear complexity**.
+本專案旨在驗證：**特徵門控 + 稀疏正則化** 是否能在**不使用明確路由網路**且具備 **$O(N)$ 線性複雜度** 的前提下，自然湧現出類似 MoE 的專家分工現象。
 
 ---
 
-# Key Idea
+## 🧠 Key Idea / 核心概念
 
-Instead of routing tokens to explicit experts like **MoE**, D2 uses **continuous gating**:
+Instead of routing tokens to explicit experts, D2 uses **continuous gating** on both Query and Key:
+不同於傳統 MoE 將 Token 強制分配給特定專家，D2 架構對 Query 與 Key 使用**連續門控 (Continuous Gating)**：
 
-```
-
+```python
 Gate = sigmoid(Wx)
-Q = Q * Gate
-K = K * Gate
+Gate_Norm = Gate / mean(Gate)
+Q = Q * Gate_Norm
+K = K * Gate_Norm
 
 ```
 
-With **L1 regularization**, many gate dimensions become inactive:
+With **L1 regularization**, inactive dimensions are forced to shut down:
+透過 **L1 正規化** 懲罰，迫使不必要的特徵維度關閉：
+
+```python
+Loss = CrossEntropy + λ * mean(Gate)
 
 ```
 
-Loss = CrossEntropy + λ * |Gate|
-
-```
-
-This encourages **feature sparsity**, allowing different tokens or domains to activate **different neural subspaces**.
+This encourages **feature sparsity**, allowing different domains (e.g., Code vs. Classical Chinese) to activate **different neural subspaces**.
+這能促進**特徵稀疏性**，讓不同領域的輸入（如：程式碼 vs 古文）激發**不同的神經元子空間**。
 
 ---
 
-# Features
+## 🏗️ Model Architecture / 模型架構
 
-* **Causal Gated-D2 Attention**
-* **Sparse feature gating via L1 regularization**
-* Residual + projection architecture
-* Handles sequences up to **256 tokens**
-* Trained from scratch on Chinese classical text
-* Approximately **50M parameters**
+The D2 architecture introduces a **Concept Gate** before the $O(N)$ Linear Attention computation.
+D2 架構在 $O(N)$ 線性注意力計算前，引入了**概念門控 (Concept Gate)**。
 
-Observed behavior:
+```text
+            ┌─────────────────────┐
+            │     Input Token     │
+            └──────────┬──────────┘
+                       ▼
+            ┌─────────────────────┐
+            │      Embedding      │
+            └──────────┬──────────┘
+                       ▼
+            ┌─────────────────────┐
+            │  Q, K, V Projection │
+            └──────────┬──────────┘
+                       ▼
+            ┌─────────────────────┐
+            │ 🌟 Concept Gate 🌟 │
+            │    sigmoid(Wx)      │
+            │  Sparse Activation  │
+            └──────────┬──────────┘
+                       │ (Gate applied to Q & K)
+                       ▼
+            ┌─────────────────────┐
+            │ ⚡ Linear Attention │
+            │ O(N) Prefix Memory  │
+            └──────────┬──────────┘
+                       ▼
+            ┌─────────────────────┐
+            │    Residual + MLP   │
+            └──────────┬──────────┘
+                       ▼
+            ┌─────────────────────┐
+            │    Output Layer     │
+            └─────────────────────┘
 
-* Classical Chinese tokens activate a **distinct subset of neurons**
-* Emergent **hierarchical feature structure**
-* Possible **implicit expert specialization**
+```
 
 ---
 
-# Training
+## ✨ Features / 架構特色
 
-1. Clone the repository
+* **Causal Gated-D2 Linear Attention** (因果門控線性注意力)
+* **Implicit MoE via Sparsity** (透過稀疏性達成隱式專家)
+* **$O(N)$ Context Scaling** ($O(N)$ 長文本擴展能力)
+* **VRAM Optimized for RTX 3060** (針對 RTX 3060 12GB 顯存極限優化：混合精度 + 梯度檢查點)
+* **Emergent Specialization** (湧現領域分工：古文、百科、程式碼激發不同神經元)
 
-```
+---
 
-git clone <repo_url>
+## 🚀 Getting Started / 快速開始
 
-```
+### 1. Install Dependencies / 安裝依賴
 
-2. Install dependencies
-
-```
-
+```bash
 pip install torch
 
 ```
 
-3. Place your training text files inside
+### 2. Prepare Data / 準備語料
+
+Place your training text files (e.g., Wiki, Classical, Python) inside the `data/` folder.
+將你的訓練文本（如：維基百科、古文、Python）放入 `data/` 資料夾中。
+
+### 3. Start Training / 開始訓練
+
+```bash
+python d2-v10.py
 
 ```
 
-data/
+### 4. Inference / 文本生成
 
-```
+Make sure the model and vocab paths are correct, then run:
+確認模型權重與字典檔路徑正確後，執行：
 
-4. Start training
-
-```
-
-python train_v7.py
-
-```
-
----
-
-# Inference
-
-Make sure the model and vocab paths are correct.
-
-Example:
-
-```
-
-model: d2_v7_50m.pth
-vocab: master_vocab_v7.json
-
-```
-
-Run:
-
-```
-
+```bash
 python chat.py
 
 ```
 
 ---
 
-# Model Scale
+## 📊 Model Scale / 模型規模
 
-| Parameter | Value |
-|--------|--------|
-| Model Size | ~50M |
-| Context Length | 256 |
-| Architecture | Gated-D2 |
-| Training Data | Chinese Classical Text |
-
----
-
-# Experiment Goal
-
-This project investigates whether **sparse gating mechanisms** can produce:
-
-* specialization similar to **Mixture-of-Experts**
-* without router networks
-* with **lower computational overhead**
+| Parameter / 參數 | Value / 規格 |
+| --- | --- |
+| **Model Size** (模型大小) | ~180M |
+| **Context Length** (上下文長度) | 768 (Scalable / 可擴充) |
+| **Architecture** (核心架構) | Gated Linear Attention |
+| **Training Data** (訓練語料) | Mixed (Wiki, Classical, Python) |
+| **Hardware** (硬體要求) | 1x RTX 3060 12GB |
 
 ---
 
-# Future Work
+## 🔮 Future Work / 未來展望
 
-Possible improvements:
-
-* Linear Attention scaling
-* Rotary Position Embedding
-* Larger datasets (Wikipedia, multilingual corpora)
-* Implicit expert activation analysis
-```
-
+* **Gate Activation Analysis** (神經元活化熱力圖分析)
+* **Rotary Position Embedding (RoPE)** (旋轉位置編碼)
+* **Soft Token Routing** (軟性 Token 路由)
 
 ```
 
-甚至可以做成 **GitHub 上會很亮眼的圖版 README**。
-那個會看起來真的像一個 **新模型 repo**。
+你的模型現在應該已經穩穩地在 3060 上跑了好幾個 Step 了吧？**我們下一階段要直接來寫 `analyze_gates.py` 神經元觀測儀器，還是你想先放著讓它煉丹一個晚上看看 Loss 能降到多低？**
+
+```
