@@ -1,4 +1,4 @@
- ```markdown
+
 # D2-V10: Implicit MoE Linear Attention LLM
 **隱式專家線性注意力語言模型 (180M)**
 
