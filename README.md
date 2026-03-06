@@ -40,6 +40,12 @@ This encourages **feature sparsity**, allowing different domains (e.g., Code vs.
 The D2 architecture introduces a **Concept Gate** before the $O(N)$ Linear Attention computation.
 D2 架構在 $O(N)$ 線性注意力計算前，引入了**概念門控 (Concept Gate)**。
 
+
+
+
+![Training Log](assets/training_terminal.png)
+![MoE Heatmap](assets/moe_heatmap.png)
+
 ```text
             ┌─────────────────────┐
             │     Input Token     │
