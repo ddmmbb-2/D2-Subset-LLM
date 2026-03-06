@@ -91,41 +91,47 @@ class CausalGatedLinearAttentionV10(nn.Module):
         
         # 1. 產生 Q, K, V 並拆分多頭
         q, k, v = self.qkv(x_norm).chunk(3, dim=-1)
-        q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2) # (B, H, T, d_head)
+        q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         
-        # 2. 🌟 Concept Gate 處理 (Q 與 K 雙向控制)
+        # 2. 🌟 Concept Gate 處理
         gate_raw = self.concept_gate(x)
         gate_sig = torch.sigmoid(gate_raw)
         
-        # 記錄未正規化的 sparsity 供 L1 Loss 使用 (解決 L1 與 Norm 的衝突)
         self.gate_sparsity = gate_sig.mean()
         
-        # Gate Normalization (避免神經元全部休眠)
-        gate_norm = gate_sig / (gate_sig.mean(dim=-1, keepdim=True) + 1e-6)
+        # EPS 稍微調大一點點，避免除以極小值
+        gate_norm = gate_sig / (gate_sig.mean(dim=-1, keepdim=True) + 1e-5)
         gate_norm = gate_norm.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         
-        # 套用 Gate
         q = q * gate_norm
         k = k * gate_norm
         
-        # 3. 🌟 V10 Kernel: ReLU(x)^2
-        q = F.relu(q)**2 + 1e-6
-        k = F.relu(k)**2 + 1e-6
+        # ==========================================
+        # 🚑 救命仙丹：強制將 Q, K, V 轉為 FP32 進行累加計算
+        # ==========================================
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
         
-        # 4. 🌟 O(N) Linear Attention 因果計算 (Prefix Memory)
-        # S = sum(k ⊗ v) 
-        # 使用 einsum 進行外積，並用 cumsum 沿著時間維度 T 累加
+        # 3. 🌟 V10 Kernel: ReLU(x)^2
+        q = F.relu(q)**2 + 1e-5
+        k = F.relu(k)**2 + 1e-5
+        
+        # 4. 🌟 O(N) Linear Attention 因果計算
         kv = torch.einsum('b h t d, b h t m -> b h t d m', k, v)
         kv_cumsum = torch.cumsum(kv, dim=2) 
         out_num = torch.einsum('b h t d, b h t d m -> b h t m', q, kv_cumsum)
         
-        # z = sum(k)
         k_cumsum = torch.cumsum(k, dim=2)
-        out_den = torch.einsum('b h t d, b h t d -> b h t', q, k_cumsum).unsqueeze(-1) + 1e-6
+        out_den = torch.einsum('b h t d, b h t d -> b h t', q, k_cumsum).unsqueeze(-1) + 1e-5
         
         out = out_num / out_den
+        
+        # 算完之後，把結果轉回原本的資料型態 (FP16)
+        out = out.to(x.dtype)
+        # ==========================================
         
         # 合併多頭
         out = out.transpose(1, 2).contiguous().view(B, T, D)
@@ -190,7 +196,7 @@ model = D2V10Model(vocab_size, config["d_model"], config["n_layers"], config["n_
 optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.05)
 criterion = nn.CrossEntropyLoss()
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
-scaler = torch.cuda.amp.GradScaler() # 🌟 加入混合精度，節省顯存
+scaler = torch.amp.GradScaler('cuda') 
 
 print(f"🚀 V10 Implicit MoE 創世紀啟動！當前規模: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
@@ -202,7 +208,7 @@ try:
         xb, yb = get_batch() 
         
         # 🌟 使用 autocast 啟動混合精度計算
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             logits = model(xb)
             loss_ce = criterion(logits.view(-1, vocab_size), yb.view(-1))
             
