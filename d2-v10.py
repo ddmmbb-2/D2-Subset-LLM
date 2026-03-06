@@ -105,32 +105,34 @@ class CausalGatedLinearAttentionV10(nn.Module):
         gate_norm = gate_sig / (gate_sig.mean(dim=-1, keepdim=True) + 1e-5)
         gate_norm = gate_norm.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         
+        # 套用 Gate
         q = q * gate_norm
         k = k * gate_norm
         
         # ==========================================
-        # 🚑 救命仙丹：強制將 Q, K, V 轉為 FP32 進行累加計算
+        # 🚑 終極防護：強制關閉 autocast，確保 einsum 真的在 FP32 執行
         # ==========================================
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
-        
-        # 3. 🌟 V10 Kernel: ReLU(x)^2
-        q = F.relu(q)**2 + 1e-5
-        k = F.relu(k)**2 + 1e-5
-        
-        # 4. 🌟 O(N) Linear Attention 因果計算
-        kv = torch.einsum('b h t d, b h t m -> b h t d m', k, v)
-        kv_cumsum = torch.cumsum(kv, dim=2) 
-        out_num = torch.einsum('b h t d, b h t d m -> b h t m', q, kv_cumsum)
-        
-        k_cumsum = torch.cumsum(k, dim=2)
-        out_den = torch.einsum('b h t d, b h t d -> b h t', q, k_cumsum).unsqueeze(-1) + 1e-5
-        
-        out = out_num / out_den
-        
+        with torch.amp.autocast('cuda', enabled=False):
+            q = q.to(torch.float32)
+            k = k.to(torch.float32)
+            v = v.to(torch.float32)
+            
+            # 🌟 換回柔和且穩定的 ELU 核心，避免 ReLU平方 造成的梯度核爆
+            q = F.elu(q) + 1.0
+            k = F.elu(k) + 1.0
+            
+            # 這裡的 einsum 終於可以安全地在 FP32 下暢遊了
+            kv = torch.einsum('b h t d, b h t m -> b h t d m', k, v)
+            kv_cumsum = torch.cumsum(kv, dim=2) 
+            out_num = torch.einsum('b h t d, b h t d m -> b h t m', q, kv_cumsum)
+            
+            k_cumsum = torch.cumsum(k, dim=2)
+            out_den = torch.einsum('b h t d, b h t d -> b h t', q, k_cumsum).unsqueeze(-1) + 1e-5
+            
+            out = out_num / out_den
+            
         # 算完之後，把結果轉回原本的資料型態 (FP16)
-        out = out.to(x.dtype)
+        out = out.to(x_norm.dtype)
         # ==========================================
         
         # 合併多頭
@@ -207,28 +209,31 @@ try:
     for epoch in range(config["epochs"]):
         xb, yb = get_batch() 
         
-        # 🌟 使用 autocast 啟動混合精度計算
+        # 🌟 啟動混合精度計算 (如果你是用 RTX 30 系列，其實可以加 dtype=torch.bfloat16 更穩)
         with torch.amp.autocast('cuda'):
             logits = model(xb)
             loss_ce = criterion(logits.view(-1, vocab_size), yb.view(-1))
             
-            # 收集未正規化的 Gate Sparsity
             l1_loss = sum(block.attn.gate_sparsity for block in model.blocks) / config["n_layers"]
-            
-            # 梯度累積計算 (Loss 平均化)
             total_loss = (loss_ce + config["l1_lambda"] * l1_loss) / config["accum_steps"]
         
-        # 使用 Scaler 反向傳播
         scaler.scale(total_loss).backward()
         
-        # 🌟 梯度累積 (Gradient Accumulation) 達到等效大 Batch Size
+        # 梯度累積與安全更新
         if (epoch + 1) % config["accum_steps"] == 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            # 🌟 安全的 Scheduler 更新邏輯
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            
+            # 只有當 Scaler 沒有因為 NaN 而退避縮小數值時，才更新學習率
+            if scaler.get_scale() >= scale_before:
+                scheduler.step()
+                
             optimizer.zero_grad()
-            scheduler.step()
         
         if epoch % 100 == 0:
             print(f"🚀 V10 | Step {epoch:05d} | Loss: {loss_ce.item():.4f} | Gate_Act: {l1_loss.item():.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
