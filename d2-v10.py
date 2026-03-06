@@ -7,7 +7,7 @@ import torch.optim as optim
 import json
 from collections import Counter
 
-# --- V10 創世紀配置區 (專為 RTX 3060 12GB 設計) ---
+# --- V10.1 強化配置區 ---
 config = {
     "d_model": 896,          
     "n_heads": 14,           
@@ -15,52 +15,36 @@ config = {
     "batch_size": 2,         
     "accum_steps": 6,        
     "block_size": 768,       
-    "lr": 4e-4,
-    "epochs": 20000,         
-    "data_dir": "data",      # 🌟 修改這裡：指向整個 data 資料夾
+    "lr": 1e-4,              # 續訓建議調低 LR 進行微雕
+    "epochs": 40000,         # 目標步數
+    "data_dir": "data",      
     "save_model": "d2_v10_genesis.pth",
     "vocab_name": "master_vocab_v10.json",
     "l1_lambda": 0.0001,     
-    "min_freq": 5            # 🌟 建議設為 5：因為古文生僻字多，提高門檻保護顯存
+    "balance_lambda": 0.01,  # 防止專家崩潰的力道
+    "min_freq": 5            
 }
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # --- 1. 字典建立與資料讀取 ---
-print(f"🔍 正在掃描 {config['data_dir']} 資料夾，準備吸收集體知識...")
+print(f"🔍 正在掃描 {config['data_dir']} 資料夾...")
 all_text = ""
-
-# 自動尋找資料夾下所有的 txt 檔案
 txt_files = glob.glob(os.path.join(config["data_dir"], "*.txt"))
-
 if not txt_files:
     raise FileNotFoundError(f"❌ 在 {config['data_dir']} 資料夾中找不到任何 .txt 檔案！")
 
 for file_path in txt_files:
-    print(f"   📖 正在讀取: {file_path}")
     with open(file_path, 'r', encoding='utf-8') as f:
-        # 用換行符號隔開不同檔案的內容，避免句意連在一起
         all_text += f.read() + "\n\n" 
 
-print("📊 正在統計字頻並啟動『顯存保護機制』...")
 counter = Counter(all_text)
-
-# 過濾掉出現次數低於 min_freq 的生僻字
 valid_chars = sorted([ch for ch, count in counter.items() if count >= config["min_freq"]])
-
-# 加入 [UNK] (Unknown) 作為兜底符號
 vocab = ["[UNK]"] + valid_chars
 vocab_size = len(vocab)
 char_to_int = {ch: i for i, ch in enumerate(vocab)}
 int_to_char = {i: ch for i, ch in enumerate(vocab)}
 unk_id = char_to_int["[UNK]"]
-
-print(f"✅ 字典淬鍊完成！")
-print(f"   - 總文本長度: {len(all_text) / (1024*1024):.2f} MB")
-print(f"   - 原始字元總數: {len(counter)}")
-print(f"   - 過濾後字典大小: {vocab_size} (已消除 {len(counter) - vocab_size} 個生僻垃圾字元)")
-
-# --- 2. 數據轉換 (下方接續原本的程式碼) ---
 data = torch.tensor([char_to_int.get(c, unk_id) for c in all_text], dtype=torch.long)
 
 def get_batch():
@@ -69,74 +53,51 @@ def get_batch():
     y = torch.stack([data[i+1:i+config["block_size"]+1] for i in ix])
     return x.to(device), y.to(device)
 
-# --- 2. Gated-D2 架構 (V10 Linear Attention 版) ---
+# --- 2. Gated-D2 架構 (V10 線性注意力 + Load Balance) ---
 class CausalGatedLinearAttentionV10(nn.Module):
     def __init__(self, d_model, n_heads):
         super().__init__()
-        assert d_model % n_heads == 0, "d_model 必須能被 n_heads 整除"
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
-        
         self.qkv = nn.Linear(d_model, d_model * 3)
         self.concept_gate = nn.Linear(d_model, d_model) 
         self.proj = nn.Linear(d_model, d_model)
         self.ln = nn.LayerNorm(d_model)
-        
-        self.gate_sparsity = 0.0 # 用於儲存 L1 懲罰值
-        
+        self.gate_sparsity = 0.0 
+        self.gate_balance = 0.0 
+
     def forward(self, x):
         B, T, D = x.shape
         x_norm = self.ln(x)
-        
-        # 1. 產生 Q, K, V 並拆分多頭
         q, k, v = self.qkv(x_norm).chunk(3, dim=-1)
+        
+        # Concept Gate
+        gate_sig = torch.sigmoid(self.concept_gate(x))
+        self.gate_sparsity = gate_sig.mean()
+        
+        # Load Balance: 獲取每個維度的平均啟動率
+        gate_usage = gate_sig.mean(dim=(0, 1)) 
+        self.gate_balance = torch.var(gate_usage) # 懲罰分配不均
+        
+        gate_norm = gate_sig / (gate_sig.mean(dim=-1, keepdim=True) + 1e-5)
+        q, k = q * gate_norm, k * gate_norm
+        
         q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        
-        # 2. 🌟 Concept Gate 處理
-        gate_raw = self.concept_gate(x)
-        gate_sig = torch.sigmoid(gate_raw)
-        
-        self.gate_sparsity = gate_sig.mean()
-        
-        # EPS 稍微調大一點點，避免除以極小值
-        gate_norm = gate_sig / (gate_sig.mean(dim=-1, keepdim=True) + 1e-5)
-        gate_norm = gate_norm.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        
-        # 套用 Gate
-        q = q * gate_norm
-        k = k * gate_norm
-        
-        # ==========================================
-        # 🚑 終極防護：強制關閉 autocast，確保 einsum 真的在 FP32 執行
-        # ==========================================
+
         with torch.amp.autocast('cuda', enabled=False):
-            q = q.to(torch.float32)
-            k = k.to(torch.float32)
-            v = v.to(torch.float32)
-            
-            # 🌟 換回柔和且穩定的 ELU 核心，避免 ReLU平方 造成的梯度核爆
-            q = F.elu(q) + 1.0
-            k = F.elu(k) + 1.0
-            
-            # 這裡的 einsum 終於可以安全地在 FP32 下暢遊了
+            q, k, v = q.float(), k.float(), v.float()
+            q, k = F.elu(q) + 1.0, F.elu(k) + 1.0
             kv = torch.einsum('b h t d, b h t m -> b h t d m', k, v)
             kv_cumsum = torch.cumsum(kv, dim=2) 
             out_num = torch.einsum('b h t d, b h t d m -> b h t m', q, kv_cumsum)
-            
             k_cumsum = torch.cumsum(k, dim=2)
             out_den = torch.einsum('b h t d, b h t d -> b h t', q, k_cumsum).unsqueeze(-1) + 1e-5
-            
             out = out_num / out_den
             
-        # 算完之後，把結果轉回原本的資料型態 (FP16)
-        out = out.to(x_norm.dtype)
-        # ==========================================
-        
-        # 合併多頭
-        out = out.transpose(1, 2).contiguous().view(B, T, D)
+        out = out.to(x_norm.dtype).transpose(1, 2).reshape(B, T, D)
         return self.proj(out)
 
 class MLP(nn.Module):
@@ -144,7 +105,7 @@ class MLP(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
-            nn.GELU(), # V11 若要升級可考慮 SwiGLU
+            nn.GELU(),
             nn.Linear(d_model * 4, d_model),
             nn.Dropout(0.1)
         )
@@ -156,9 +117,7 @@ class D2V10Block(nn.Module):
         super().__init__()
         self.attn = CausalGatedLinearAttentionV10(d_model, n_heads)
         self.mlp = MLP(d_model)
-        
     def forward(self, x):
-        # Block 的任務是單純的特徵提取與殘差連接
         x = x + self.attn(x)
         x = x + self.mlp(x)
         return x
@@ -170,37 +129,23 @@ class D2V10Model(nn.Module):
         self.blocks = nn.Sequential(*[D2V10Block(d_model, n_heads) for _ in range(n_layers)])
         self.out_ln = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size)
-        self.apply(self._init_weights)
-        
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None: torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
     def forward(self, x):
-        # Model 才是負責把 Token 轉 Embedding，然後進入 Checkpoint 迴圈的地方
         x = self.embedding(x)
-        
-        # 🌟 啟動 Gradient Checkpointing，完美壓制顯存
         for block in self.blocks:
             x = torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)
-            
         return self.head(self.out_ln(x))
 
-# --- 3. V10 創世紀點火 (加入 3060 榨汁機優化) ---
+# --- 3. 點火訓練 ---
 model = D2V10Model(vocab_size, config["d_model"], config["n_layers"], config["n_heads"]).to(device)
 
-# 推薦使用 torch.compile 提升 15-30% 速度 (若你的 PyTorch 版本支援)
-# model = torch.compile(model) 
+if os.path.exists(config["save_model"]):
+    print(f"♻️ 正在喚醒 V10 大腦進行續訓...")
+    model.load_state_dict(torch.load(config["save_model"], map_location=device, weights_only=True))
 
 optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.05)
 criterion = nn.CrossEntropyLoss()
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
 scaler = torch.amp.GradScaler('cuda') 
-
-print(f"🚀 V10 Implicit MoE 創世紀啟動！當前規模: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
 model.train()
 optimizer.zero_grad()
@@ -208,38 +153,31 @@ optimizer.zero_grad()
 try:
     for epoch in range(config["epochs"]):
         xb, yb = get_batch() 
-        
-        # 🌟 啟動混合精度計算 (如果你是用 RTX 30 系列，其實可以加 dtype=torch.bfloat16 更穩)
         with torch.amp.autocast('cuda'):
             logits = model(xb)
             loss_ce = criterion(logits.view(-1, vocab_size), yb.view(-1))
             
-            l1_loss = sum(block.attn.gate_sparsity for block in model.blocks) / config["n_layers"]
-            total_loss = (loss_ce + config["l1_lambda"] * l1_loss) / config["accum_steps"]
+            l1_val = sum(b.attn.gate_sparsity for b in model.blocks) / config["n_layers"]
+            bal_val = sum(b.attn.gate_balance for b in model.blocks) / config["n_layers"]
+            
+            # 總損失：包含交叉熵、L1 稀疏與負載均衡
+            total_loss = (loss_ce + config["l1_lambda"] * l1_val + config["balance_lambda"] * bal_val) / config["accum_steps"]
         
         scaler.scale(total_loss).backward()
         
-        # 梯度累積與安全更新
         if (epoch + 1) % config["accum_steps"] == 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
-            # 🌟 安全的 Scheduler 更新邏輯
-            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
-            
-            # 只有當 Scaler 沒有因為 NaN 而退避縮小數值時，才更新學習率
-            if scaler.get_scale() >= scale_before:
-                scheduler.step()
-                
+            scheduler.step()
             optimizer.zero_grad()
         
         if epoch % 100 == 0:
-            print(f"🚀 V10 | Step {epoch:05d} | Loss: {loss_ce.item():.4f} | Gate_Act: {l1_loss.item():.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"🚀 V10+ | Step {epoch:05d} | Loss: {loss_ce.item():.4f} | Sparse: {l1_val.item():.4f} | Bal: {bal_val.item():.5f}")
 
 except KeyboardInterrupt:
-    print("\n⚠️ 訓練中斷，正在封裝 V10 大腦...")
+    print("\n⚠️ 訓練中斷，正在保存結晶...")
 
 torch.save(model.state_dict(), config["save_model"])
 with open(config["vocab_name"], "w", encoding="utf-8") as f:
