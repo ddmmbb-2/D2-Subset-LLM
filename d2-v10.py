@@ -1,3 +1,5 @@
+import os
+import glob
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,34 +10,57 @@ from collections import Counter
 # --- V10 創世紀配置區 (專為 RTX 3060 12GB 設計) ---
 config = {
     "d_model": 896,          
-    "n_heads": 14,           # 🌟 新增：多頭機制，d_head = 64，這對 O(N) 狀態計算至關重要
+    "n_heads": 14,           
     "n_layers": 16,
-    "batch_size": 4,         # 降低 Batch Size，改用梯度累積 (Gradient Accumulation) 模擬 12
-    "accum_steps": 3,        # 4 * 3 = 12 (等效 Batch Size)
-    "block_size": 768,       # 長序列測試基準
+    "batch_size": 4,         
+    "accum_steps": 3,        
+    "block_size": 768,       
     "lr": 4e-4,
-    "epochs": 20000,         # Stage 1 架構驗證
-    "data_path": "data/wiki_50MB.txt",  
+    "epochs": 20000,         
+    "data_dir": "data",      # 🌟 修改這裡：指向整個 data 資料夾
     "save_model": "d2_v10_genesis.pth",
     "vocab_name": "master_vocab_v10.json",
-    "l1_lambda": 0.0001,     # 稍微調低，因為我們改為懲罰 pre-norm gate
-    "min_freq": 3            
+    "l1_lambda": 0.0001,     
+    "min_freq": 5            # 🌟 建議設為 5：因為古文生僻字多，提高門檻保護顯存
 }
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# --- 1. 字典建立 (省略重複的 Print，與 V9 邏輯相同) ---
-with open(config["data_path"], 'r', encoding='utf-8') as f:
-    all_text = f.read()
+# --- 1. 字典建立與資料讀取 ---
+print(f"🔍 正在掃描 {config['data_dir']} 資料夾，準備吸收集體知識...")
+all_text = ""
 
+# 自動尋找資料夾下所有的 txt 檔案
+txt_files = glob.glob(os.path.join(config["data_dir"], "*.txt"))
+
+if not txt_files:
+    raise FileNotFoundError(f"❌ 在 {config['data_dir']} 資料夾中找不到任何 .txt 檔案！")
+
+for file_path in txt_files:
+    print(f"   📖 正在讀取: {file_path}")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        # 用換行符號隔開不同檔案的內容，避免句意連在一起
+        all_text += f.read() + "\n\n" 
+
+print("📊 正在統計字頻並啟動『顯存保護機制』...")
 counter = Counter(all_text)
+
+# 過濾掉出現次數低於 min_freq 的生僻字
 valid_chars = sorted([ch for ch, count in counter.items() if count >= config["min_freq"]])
+
+# 加入 [UNK] (Unknown) 作為兜底符號
 vocab = ["[UNK]"] + valid_chars
 vocab_size = len(vocab)
 char_to_int = {ch: i for i, ch in enumerate(vocab)}
 int_to_char = {i: ch for i, ch in enumerate(vocab)}
 unk_id = char_to_int["[UNK]"]
 
+print(f"✅ 字典淬鍊完成！")
+print(f"   - 總文本長度: {len(all_text) / (1024*1024):.2f} MB")
+print(f"   - 原始字元總數: {len(counter)}")
+print(f"   - 過濾後字典大小: {vocab_size} (已消除 {len(counter) - vocab_size} 個生僻垃圾字元)")
+
+# --- 2. 數據轉換 (下方接續原本的程式碼) ---
 data = torch.tensor([char_to_int.get(c, unk_id) for c in all_text], dtype=torch.long)
 
 def get_batch():
