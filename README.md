@@ -15,21 +15,20 @@ This project explores whether **feature gating + sparsity regularization** can p
 Instead of routing tokens to explicit experts, D2 uses **continuous gating** on both Query and Key:
 不同於傳統 MoE 將 Token 強制分配給特定專家，D2 架構對 Query 與 Key 使用**連續門控 (Continuous Gating)**：
 
-```python
+
 Gate = sigmoid(Wx)
 Gate_Norm = Gate / mean(Gate)
 Q = Q * Gate_Norm
 K = K * Gate_Norm
 
-```
 
 With **L1 regularization**, inactive dimensions are forced to shut down:
 透過 **L1 正規化** 懲罰，迫使不必要的特徵維度關閉：
 
-```python
+
 Loss = CrossEntropy + λ * mean(Gate)
 
-```
+
 
 This encourages **feature sparsity**, allowing different domains (e.g., Code vs. Classical Chinese) to activate **different neural subspaces**.
 這能促進**特徵稀疏性**，讓不同領域的輸入（如：程式碼 vs 古文）激發**不同的神經元子空間**。
