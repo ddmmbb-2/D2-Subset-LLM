@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.decomposition import PCA
 
-# --- 1. 核心模型架構 (與 d2-v10.py 完全一致) ---
+
 class CausalGatedLinearAttentionV10(nn.Module):
     def __init__(self, d_model, n_heads):
         super().__init__()
@@ -83,19 +83,21 @@ class D2V10Model(nn.Module):
 
 # --- 2. 分析儀配置 ---
 CONFIG = {
-    "d_model": 896,
-    "n_heads": 14,
-    "n_layers": 16,
-    "model_path": "d2_v10_genesis.pth",
-    "vocab_path": "master_vocab_v10.json",
+    "d_model": 768,
+    "n_heads": 12,
+    "n_layers": 24,
+    "model_path": "d2_v11_genesis_180m.pth",
+    "vocab_path": "master_vocab_v11.json",
     "device": "cuda" if torch.cuda.is_available() else "cpu"
 }
 
 # 測試案例
+# 測試案例 (已加入邏輯推導)
 test_cases = {
     "Wiki (Modern)": "維基百科是一個自由內容的百科全書計畫，其目標是向全人類提供完整的知識。",
     "Classical (Ancient)": "子曰：學而時習之，不亦說乎？有朋自遠方來，不亦樂乎？",
-    "Python (Code)": "def train_model(data):\n    optimizer.zero_grad()\n    loss = criterion(model(data))\n    return loss"
+    "Python (Code)": "def train_model(data):\n    optimizer.zero_grad()\n    loss = criterion(model(data))\n    return loss",
+    "Logic (Math)": "問題：阿芳有7個香蕉，給了小明2個。請問阿芳現在有幾個香蕉？\n【思考過程】\n1. 初始狀態：阿芳有 7 個。\n2. 動作：給出 2 個，所以要用減法。\n3. 計算：7 - 2 = 5。\n【答案】"
 }
 
 def run_analysis():
