@@ -102,7 +102,7 @@ Place your training text files (e.g., Wiki, Classical, Python) inside the data/ 
 Bash
 
 
-python train.py
+python V11_QLLM2_Genesis.py
 
 
 4. Inference / 文本生成
