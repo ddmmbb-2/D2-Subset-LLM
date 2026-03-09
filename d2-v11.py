@@ -9,26 +9,27 @@ from collections import Counter
 from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
+from tqdm import tqdm  # 🌟 進度條套件
 
 # ==========================================
-# 🚀 V11 穩定轉生配置 (180M 級別)
+# 🚀 V11 穩定轉生配置 (180M 級別) + QLLM2
 # 完美適配 RTX 3060 12GB 
 # ==========================================
 config = {
-    "d_model": 768,          # 🧠 降至 768 (標準 180M 級別尺寸)
-    "n_heads": 12,           # 🧠 配合 768 維度 (768 / 64 = 12頭)
-    "n_layers": 24,          # 🧠 深度維持 24 層，強化邏輯推導 (總參數約 184M)
+    "d_model": 768,          
+    "n_heads": 12,           
+    "n_layers": 24,          
     "batch_size": 2,         
     "block_size": 768,       
     "accum_steps": 12,       
-    "lr": 2e-4,              # 模型變小，可以稍微提速至 2e-4
+    "lr": 2e-4,              
     "epochs": 40000,         
-    "warmup_steps": 2000,    # 前 2000 步熱身防爆
+    "warmup_steps": 2000,    
     "data_dir": "data",      
-    "save_model": "d2_v11_genesis_180m.pth", # 更改檔名避免覆蓋 330M 的權重
+    "save_model": "d2_v11_genesis_180m.pth", 
     "vocab_name": "master_vocab_v11.json", 
-    "l1_lambda": 0.0003,     
-    "balance_lambda": 0.01,  
+    "l1_lambda": 0.02,       
+    "balance_lambda": 0.05,
     "min_freq": 5            
 }
 
@@ -76,7 +77,7 @@ def get_batch():
     return x.to(device), y.to(device)
 
 # ==========================================
-# 2. V11 模型架構 (修正 NaN 與多頭機制)
+# 2. V11 模型架構 (融合 QLLM2 波干涉)
 # ==========================================
 class CausalGatedD2Attention(nn.Module):
     def __init__(self, d_model):
@@ -85,7 +86,8 @@ class CausalGatedD2Attention(nn.Module):
         self.d_head = d_model // self.n_heads
         
         self.qkv = nn.Linear(d_model, d_model * 3)
-        self.concept_gate = nn.Linear(d_model, d_model) 
+        self.semantic_bank = nn.Linear(d_model, d_model * 2) 
+        self.context_bank = nn.Linear(d_model, d_model * 2)  
         self.proj = nn.Linear(d_model, d_model)
         self.ln = nn.LayerNorm(d_model)
         
@@ -93,42 +95,30 @@ class CausalGatedD2Attention(nn.Module):
         B, L, D = x.shape
         x_norm = self.ln(x)
         
-        # 取得 Q, K, V
         q, k, v = self.qkv(x_norm).chunk(3, dim=-1)
         
-        # 隱式 MoE: 概念門控 (Gating)
-        gate = torch.sigmoid(self.concept_gate(x))
+        # 🌊 波干涉隱式 MoE
+        sem_amp, sem_phase = self.semantic_bank(x).chunk(2, dim=-1)
+        ctx_amp, ctx_phase = self.context_bank(x).chunk(2, dim=-1)
+        interference = F.softplus(sem_amp) * F.softplus(ctx_amp) * torch.cos(sem_phase - ctx_phase)
+        gate = torch.sigmoid(interference)
         k = k * gate 
         
-        # 切分為多頭 [Batch, Heads, SeqLen, d_head]
         q = q.view(B, L, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B, L, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, L, self.n_heads, self.d_head).transpose(1, 2)
         
-        # --- 🌟 正確的因果線性注意力 (Causal Linear Attention) ---
-        # 為了避免溢位，強制轉為 FP32 進行核心運算
         q_f, k_f, v_f = q.float(), k.float(), v.float()
-        
-        # 確保 Q, K 為正數 (核函數映射)
         q_f = F.elu(q_f) + 1.0
         k_f = F.elu(k_f) + 1.0
         
-        # 【分子計算】計算 K^T * V 的因果累積 (這是 d x d 的核心！)
-        # 利用 unsqueeze 創造 [B, H, L, d, d] 的狀態矩陣
         kv_state = k_f.unsqueeze(-1) * v_f.unsqueeze(-2)  
-        kv_cumsum = torch.cumsum(kv_state, dim=2) # 沿著時間維度 L 進行因果累積
-        
-        # Q 去乘上每一刻的累積狀態矩陣
-        out_num = torch.matmul(q_f.unsqueeze(-2), kv_cumsum).squeeze(-2) # [B, H, L, d]
-        
-        # 【分母計算】計算 K 的因果累積
+        kv_cumsum = torch.cumsum(kv_state, dim=2) 
+        out_num = torch.matmul(q_f.unsqueeze(-2), kv_cumsum).squeeze(-2) 
         k_cumsum = torch.cumsum(k_f, dim=2)
         out_den = (q_f * k_cumsum).sum(dim=-1, keepdim=True) + 1e-6
         
-        # 兩者相除 (這時分子和分母的因果時間軸完全對齊，絕不會爆炸)
         attn_out = out_num / out_den
-        
-        # --- 轉回原資料型態並合併多頭 ---
         attn_out = attn_out.to(x.dtype)
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, L, D)
         
@@ -168,37 +158,22 @@ class D2V11Model(nn.Module):
     def forward(self, x):
         x = self.embedding(x)
         gates = []
-        
         for block in self.blocks:
-            # 🛡️ 啟動梯度檢查點！
-            # PyTorch 不會再死記硬背那龐大的 [L, d, d] 矩陣
-            # 這會直接把 VRAM 佔用砍掉一半以上！
             x, gate = checkpoint(block, x, use_reentrant=False)
             gates.append(gate)
             
         logits = self.head(self.out_ln(x))
-        
         all_gates = torch.stack(gates) 
         sparse_loss = all_gates.mean()
         balance_loss = all_gates.mean(dim=(0, 1, 2)).var() 
-        
         return logits, sparse_loss, balance_loss
 
 # ==========================================
-# 3. 初始化與防爆優化器設定
+# 3. 初始化與完美斷點續傳 (Checkpoint)
 # ==========================================
 model = D2V11Model(vocab_size, config["d_model"], config["n_layers"]).to(device)
-
-if os.path.exists(config["save_model"]):
-    model.load_state_dict(torch.load(config["save_model"], map_location=device, weights_only=True))
-    print("✅ 成功載入 V11 舊有權重！")
-else:
-    print(f"🌟 初始化全新 V11 大腦！(參數規模約 {sum(p.numel() for p in model.parameters())/1e6:.1f}M)")
-
 optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.01)
 
-
-# --- 自動學習率排程器 (Warmup + Cosine Decay) ---
 def lr_lambda(current_step):
     if current_step < config["warmup_steps"]:
         return float(current_step) / float(max(1, config["warmup_steps"]))
@@ -207,13 +182,35 @@ def lr_lambda(current_step):
 
 scheduler = LambdaLR(optimizer, lr_lambda)
 
+global_step = 0
+
+if os.path.exists(config["save_model"]):
+    checkpoint_data = torch.load(config["save_model"], map_location=device, weights_only=False)
+    
+    if 'model_state_dict' in checkpoint_data:
+        model.load_state_dict(checkpoint_data['model_state_dict'])
+        optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+        global_step = checkpoint_data['step']
+        print(f"✅ 完美接續！從 Step {global_step} 恢復完整訓練狀態！")
+    else:
+        model.load_state_dict(checkpoint_data)
+        global_step = 2000
+        for _ in range(global_step): scheduler.step() 
+        print(f"✅ 載入初代權重，從 Step {global_step} 繼續衝刺！")
+else:
+    print(f"🌟 初始化全新 V11 大腦！(參數規模約 {sum(p.numel() for p in model.parameters())/1e6:.1f}M)")
+
 # ==========================================
-# 4. 訓練迴圈 (BF16 絕對防爆版)
+# 4. 訓練迴圈 (支援接續的進度條)
 # ==========================================
 print("🚀 V11 轉生計畫啟動！(啟動 RTX 3060 專屬 BF16 絕對防護)")
 model.train()
 
-global_step = 0
+# 讓進度條正確顯示目前的進度
+pbar = tqdm(initial=global_step, total=config["epochs"], desc="🧠 V11 訓練中", dynamic_ncols=True)
+
+# 刪除了原本錯誤的 global_step = 0，直接從現在的 step 開始
 while global_step < config["epochs"]:
     optimizer.zero_grad(set_to_none=True)
     
@@ -224,39 +221,45 @@ while global_step < config["epochs"]:
     for _ in range(config["accum_steps"]):
         xb, yb = get_batch()
         
-        # 🌟 核心關鍵：強制使用 bfloat16，天花板提升至 10^38，永不溢位！
         with autocast('cuda', dtype=torch.bfloat16):
             logits, sparse_loss, balance_loss = model(xb)
             ce_loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
             loss = ce_loss + config["l1_lambda"] * sparse_loss + config["balance_lambda"] * balance_loss
             loss = loss / config["accum_steps"]
             
-        # 直接 backward，不需要 scaler！
         loss.backward()
         
         total_loss += ce_loss.item() 
         total_sparse += sparse_loss.item()
         total_bal += balance_loss.item()
 
-    # --- 🌟 梯度裁剪 (防滾籠) ---
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
-    # 乾淨俐落的 step，沒有警告，沒有囉嗦
     optimizer.step()
     scheduler.step()
 
     global_step += 1
+    pbar.update(1)
     
-    # 測試階段，我們先每 5 步印一次，確認它真的跑起來了！
-    if global_step % 100 == 0:
-        current_lr = scheduler.get_last_lr()[0] 
-        avg_loss = total_loss / config["accum_steps"]
-        avg_sparse = total_sparse / config["accum_steps"]
-        avg_bal = total_bal / config["accum_steps"]
-        print(f"🚀 V11 | Step {global_step:05d} | Loss: {avg_loss:.4f} | LR: {current_lr:.6f} | Sparse: {avg_sparse:.4f} | Bal: {avg_bal:.5f}")
+    current_lr = scheduler.get_last_lr()[0] 
+    avg_loss = total_loss / config["accum_steps"]
+    avg_sparse = total_sparse / config["accum_steps"]
+    avg_bal = total_bal / config["accum_steps"]
+    
+    pbar.set_postfix({
+        "Loss": f"{avg_loss:.4f}",
+        "LR": f"{current_lr:.2e}",
+        "Gate": f"{avg_sparse:.3f}"
+    })
         
     if global_step % 2000 == 0:
-        torch.save(model.state_dict(), config["save_model"])
-        print(f"💾 Step {global_step} 模型已儲存至 {config['save_model']}")
+        checkpoint_data = {
+            'step': global_step,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict()
+        }
+        torch.save(checkpoint_data, config["save_model"])
+        tqdm.write(f"💾 Step {global_step} 完整進度已存檔至 {config['save_model']}")
 
 print("🎉 V11 訓練完成！")
