@@ -234,4 +234,3 @@ D2-V11 is an exploration toward this direction.
 
 
 
-這三個加上去，整個專案會 **直接從 hobby project 變 research project 等級**。
