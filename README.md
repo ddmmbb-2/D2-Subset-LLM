@@ -2,11 +2,13 @@
 
 **波干涉隱式專家線性注意力語言模型**
 
-A lightweight experimental Large Language Model exploring **Causal Linear Attention** combined with **Wave-Interference Gating**, inspired by qllm2.
+A lightweight experimental Large Language Model exploring **Causal Linear Attention** combined with **Wave-Interference Gating**. The core wave mechanics and phase interference formulations in this project are deeply inspired by and adapted from [**qllm2** by gowrav-vishwakarma](https://github.com/gowrav-vishwakarma/qllm2).
 
 This model is trained **from scratch** on a mixed corpus including **Wikipedia**, **Classical Chinese**, and **Python code**, aiming to study whether **phase coherence and sparsity regularization** can produce **emergent specialization** similar to Mixture-of-Experts (MoE) — but **without explicit routing** and while maintaining **O(N) linear complexity**.
 
 這是一個輕量級 LLM 架構實驗，探索由 **波干涉門控 (Wave-Interference Gating)** 驅動的 **因果線性注意力 (Causal Linear Attention)**。
+本專案的核心波函數機制與相位干涉概念，主要借鑒並改編自 [**qllm2** (gowrav-vishwakarma)](https://github.com/gowrav-vishwakarma/qllm2)。
+
 模型使用 **混合語料（維基百科、古文、Python 程式碼）從零開始訓練**。
 
 本專案的核心問題是：
@@ -22,7 +24,7 @@ This model is trained **from scratch** on a mixed corpus including **Wikipedia**
 
 Traditional MoE architectures **explicitly route tokens** to different experts.
 
-D2-V11 instead treats **tokens as waves**.
+Building upon the quantum-inspired token mechanics from **qllm2**, D2-V11 instead treats **tokens as waves**.
 
 Features are projected into two latent spaces:
 
@@ -32,7 +34,7 @@ Features are projected into two latent spaces:
 Their **phase coherence** determines whether features are **amplified or cancelled** through wave interference.
 
 不同於傳統 MoE 透過 Router 強制分配 token，
-D2-V11 將 **Token 視為波 (Wave Representation)**。
+D2-V11 延續了 **qllm2** 將 **Token 視為波 (Wave Representation)** 的創新概念。
 
 模型將特徵投射到兩個潛在空間：
 
@@ -227,10 +229,17 @@ python chat.py
 
 ## 📜 Research Question
 
-> Can **phase-coherent interference + sparsity** produce
+> Can **phase-coherent interference + sparsity** produce 
 > **implicit expert specialization** without explicit routing?
 
 D2-V11 is an exploration toward this direction.
 
+---
 
+## 🙏 Acknowledgments / 鳴謝
 
+Special thanks to the [**qllm2**](https://github.com/gowrav-vishwakarma/qllm2) project by **gowrav-vishwakarma**. 
+The core concepts of treating tokens as waves, utilizing phase dynamics, and implementing wave-interference gating in D2-V11 were deeply inspired by their pioneering work on quantum-inspired LLM architectures. 
+
+特別感謝 **gowrav-vishwakarma** 開源的 [**qllm2**](https://github.com/gowrav-vishwakarma/qllm2) 專案。
+D2-V11 中將 Token 視為波的核心概念、相位動力學的運用，以及波干涉門控 (Wave-Interference Gating) 的機制，均深受其在量子啟發 (Quantum-inspired) 語言模型架構上先驅性工作的啟發與影響。
