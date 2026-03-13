@@ -55,19 +55,19 @@ By analyzing the internal activation rates (Gate Values) of the trained model, w
 
 ### 1. Emergent Domain Specialization (專家分工湧現)
 Different attention heads automatically specialize in different domains. For example, Head 3 (H3) shows significantly higher activation when processing Python code and Math logic compared to Classical Chinese.
-![MoE Heatmap](d2-v12-qllm-moe/moe_heatmap.png)
+![MoE Heatmap](20260312/moe_heatmap.png)
 
 ### 2. Layer Specialization Trend (神經層級分工)
 The model exhibits a perfect "U-shaped" activation curve. Early layers process basic token recognition, middle layers (the routing center) sharply decrease activation to perform sparse expert routing, and deep layers re-activate to integrate outputs.
-![Layer Specialization](d2-v12-qllm-moe/layer_specialization.png)
+![Layer Specialization](20260312/layer_specialization.png)
 
 ### 3. Domain Clustering in Semantic Space (波干涉語意空間聚類)
 Through PCA dimensionality reduction on the Wave Interference Gates, we can see that natural languages (Wiki, Classical) and logical languages (Python, Math) are projected into entirely distinct neural subspaces.
-![Domain Clustering](d2-v12-qllm-moe/domain_clustering.png)
+![Domain Clustering](20260312/domain_clustering.png)
 
 ### 4. Head Variance & Expert Specificity (頭部活化變異與專家評分)
-![Expert Score](d2-v12-qllm-moe/expert_score.png)
-![Head Variance](d2-v12-qllm-moe/head_variance.png)
+![Expert Score](20260312/expert_score.png)
+![Head Variance](20260312/head_variance.png)
 
 ---
 
