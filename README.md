@@ -177,3 +177,29 @@ The core concepts of treating tokens as waves, utilizing phase dynamics, and imp
 
 特別感謝 **gowrav-vishwakarma** 開源的 **[qllm2](https://github.com/gowrav-vishwakarma/qllm2)** 專案。D2-V12 中將 Token 視為波的核心概念、相位動力學的運用，以及波干涉門控的機制，均深受其在量子啟發 (Quantum-inspired) 語言模型架構上先驅性工作的啟發。
 
+
+---
+
+## 🚧 Current Status & Future Outlook / 目前進度與展望
+
+As of the current version, the core architecture and basic logic of D2-V12 have been successfully validated. However, during the experimentation process, a critical bottleneck regarding data diversity was identified:
+
+* **Interdisciplinary Corpus Gap**: To enable the model to switch between different domains or "thinking modes" within a single dialogue, a more robust cross-domain dataset is required. Without this, the model tends to stay within a single latent space during inference.
+* **The Hypothesis**: We predict that with sufficient cross-domain training, the Wave-Gated Linear Attention mechanism will allow the model to dynamically shift its "phase" or internal state when processing complex, multi-faceted queries.
+* **Hardware Constraints**: Due to current hardware limitations (Single RTX 3060 12GB), processing and training on large-scale, high-quality interdisciplinary corpora is currently unfeasible. 
+
+Therefore, development is temporarily paused at this validation stage. We have proven the architecture's potential; further scaling will require more significant compute and data engineering.
+
+---
+
+目前版本已基本完成核心架構與邏輯的驗證。但在實驗過程中，我們觀察到了關於資料多樣性的關鍵瓶頸：
+
+* **跨領域語料的必要性**：為了讓模型具備在同一個對話中切換不同領域思維（Thinking modes）的能力，我們發現需要更豐富的跨領域語料。缺乏此類數據會導致模型在推理時傾向於停留在單一領域分佈中。
+* **技術預測**：我們預測，若配合跨領域語料，波干涉門控（Wave-Gated）機制能讓模型在處理複雜問題時，具備在同一個思考鏈中動態切換模型「相位」或狀態的能力。
+* **硬體限制**：受限於目前單張 RTX 3060 12GB 的運算能力與 VRAM 空間，目前無法針對大規模跨領域語料進行有效的數據準備與訓練驗證。
+
+因此，本專案暫時停留在目前的驗證階段。我們已經證明了此架構的可行性，後續的規模化（Scaling）將依賴更強大的算力支援與更精細的語料工程。
+
+
+
+
